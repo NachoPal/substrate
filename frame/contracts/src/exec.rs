@@ -315,6 +315,14 @@ pub trait Ext: sealing::Sealed {
 
 	/// Get a mutable reference to the nested gas meter.
 	fn gas_meter(&mut self) -> &mut GasMeter<Self::T>;
+
+	/// Append a line to the debug message buffer.
+	///
+	/// This is a no-op if debug message recording is disabled which is always the case
+	/// when the code is executing on-chain.
+	///
+	/// Returns `true` if debug message recording is disabled. Otherwise `false` is returned.
+	fn append_debug_line(&mut self, msg: &str) -> bool;
 }
 
 /// Describes the different functions that can be exported by an [`Executable`].
@@ -433,6 +441,7 @@ pub struct Stack<'a, T: Config, E> {
 	frames: SmallVec<T::CallStack>,
 	/// Statically guarantee that each call stack has at least one frame.
 	first_frame: Frame<T>,
+	debug_message: Option<&'a mut Vec<u8>>,
 	/// No executable is held by the struct but influences its behaviour.
 	_phantom: PhantomData<E>,
 }
@@ -631,6 +640,7 @@ where
 			account_counter: None,
 			first_frame,
 			frames: Default::default(),
+			debug_message: None,
 			_phantom: Default::default(),
 		};
 
@@ -1136,7 +1146,7 @@ where
 	fn block_number(&self) -> T::BlockNumber { self.block_number }
 
 	fn max_value_size(&self) -> u32 {
-		T::MaxValueSize::get()
+		T::Schedule::get().limits.payload_len
 	}
 
 	fn get_weight_price(&self, weight: Weight) -> BalanceOf<Self::T> {
@@ -1153,6 +1163,18 @@ where
 
 	fn gas_meter(&mut self) -> &mut GasMeter<Self::T> {
 		&mut self.frame_mut().nested_meter
+	}
+
+	fn append_debug_line(&mut self, msg: &str) -> bool {
+		if let Some(buffer) = &mut self.debug_message {
+			if !msg.is_empty() {
+				buffer.extend(msg.as_bytes().iter().chain(b"\n".iter()));
+				log::info!(target: "runtime::contracts", "seal_println: {}", msg);
+			}
+			true
+		} else {
+			false
+		}
 	}
 }
 
@@ -1196,7 +1218,7 @@ mod tests {
 			test_utils::{place_contract, set_balance, get_balance},
 		},
 		exec::ExportedFunction::*,
-		Error, Weight, CurrentSchedule,
+		Error, Weight,
 	};
 	use sp_core::Bytes;
 	use sp_runtime::DispatchError;
@@ -1387,7 +1409,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&BOB, exec_ch);
 
 			assert_matches!(
@@ -1438,7 +1460,7 @@ mod tests {
 		);
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&BOB, return_ch);
 			set_balance(&origin, 100);
 			let balance = get_balance(&dest);
@@ -1499,7 +1521,7 @@ mod tests {
 		);
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&BOB, return_ch);
 
 			let result = MockStack::with_call(
@@ -1529,8 +1551,8 @@ mod tests {
 		);
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
-			place_contract(&dest, return_ch);
+			let schedule = <Test as Config>::Schedule::get();
+			place_contract(&BOB, return_ch);
 
 			let result = MockStack::with_call(
 				origin,
@@ -1556,7 +1578,7 @@ mod tests {
 
 		// This one tests passing the input data into a contract via call.
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&BOB, input_data_ch);
 
 			let result = MockStack::with_call(
@@ -1580,7 +1602,7 @@ mod tests {
 
 		// This one tests passing the input data into a contract via instantiate.
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let subsistence = Contracts::<Test>::subsistence_threshold();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			let executable = MockExecutable::from_storage(
@@ -1634,7 +1656,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			set_balance(&BOB, 1);
 			place_contract(&BOB, recurse_ch);
 
@@ -1683,7 +1705,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&dest, bob_ch);
 			place_contract(&CHARLIE, charlie_ch);
 
@@ -1722,7 +1744,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			place_contract(&BOB, bob_ch);
 			place_contract(&CHARLIE, charlie_ch);
 
@@ -1744,7 +1766,7 @@ mod tests {
 		let dummy_ch = MockLoader::insert(Constructor, |_, _| exec_success());
 
 		ExtBuilder::default().existential_deposit(15).build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			let executable = MockExecutable::from_storage(
 				dummy_ch, &schedule, &mut gas_meter
@@ -1773,7 +1795,7 @@ mod tests {
 		);
 
 		ExtBuilder::default().existential_deposit(15).build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			let executable = MockExecutable::from_storage(
 				dummy_ch, &schedule, &mut gas_meter
@@ -1810,7 +1832,7 @@ mod tests {
 		);
 
 		ExtBuilder::default().existential_deposit(15).build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			let executable = MockExecutable::from_storage(
 				dummy_ch, &schedule, &mut gas_meter
@@ -1859,7 +1881,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().existential_deposit(15).build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			set_balance(&ALICE, Contracts::<Test>::subsistence_threshold() * 100);
 			place_contract(&BOB, instantiator_ch);
 
@@ -1909,7 +1931,7 @@ mod tests {
 		});
 
 		ExtBuilder::default().existential_deposit(15).build().execute_with(|| {
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			set_balance(&ALICE, 1000);
 			set_balance(&BOB, 100);
 			place_contract(&BOB, instantiator_ch);
@@ -1938,7 +1960,7 @@ mod tests {
 			.existential_deposit(15)
 			.build()
 			.execute_with(|| {
-				let schedule = <CurrentSchedule<Test>>::get();
+				let schedule = <Test as Config>::Schedule::get();
 				let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 				let executable = MockExecutable::from_storage(
 					terminate_ch, &schedule, &mut gas_meter
@@ -1978,7 +2000,7 @@ mod tests {
 
 		ExtBuilder::default().build().execute_with(|| {
 			let subsistence = Contracts::<Test>::subsistence_threshold();
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			let executable = MockExecutable::from_storage(
 				rent_allowance_ch, &schedule, &mut gas_meter
@@ -2011,7 +2033,7 @@ mod tests {
 
 		ExtBuilder::default().build().execute_with(|| {
 			let subsistence = Contracts::<Test>::subsistence_threshold();
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			set_balance(&ALICE, subsistence * 10);
 			place_contract(&BOB, code_hash);
@@ -2060,7 +2082,7 @@ mod tests {
 
 		ExtBuilder::default().build().execute_with(|| {
 			let subsistence = Contracts::<Test>::subsistence_threshold();
-			let schedule = <CurrentSchedule<Test>>::get();
+			let schedule = <Test as Config>::Schedule::get();
 			let mut gas_meter = GasMeter::<Test>::new(GAS_LIMIT);
 			set_balance(&ALICE, subsistence * 100);
 			place_contract(&BOB, code_hash);
